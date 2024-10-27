@@ -15,6 +15,13 @@ struct port_stat {
 
 BPF_HASH(port_counters, __u16, struct port_stat);
 
+/*  
+    Program to avoid packets being spammed to the same port.
+    Keeps track of packets arrived for each port using port_stat
+    last_check to reset the counter if it has been a while since the first packet has been sent
+    not deleting any records since there's only 65k ports (Cannot go over that).
+*/
+
 int xdp_udp_flood(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
