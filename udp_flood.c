@@ -3,7 +3,6 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/udp.h>
-#include <bcc/proto.h>
 
 #define THRESHOLD_PACKETS 100    // Maximum packets per interval for a single port
 #define TIME_WINDOW 1000000000   // 1 second
@@ -13,7 +12,12 @@ struct port_stat {
     __u64 last_check;
 };
 
-BPF_HASH(port_counters, __u16, struct port_stat);
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u16);
+    __type(value, struct port_stat);
+    __uint(max_entries, 65536);
+} port_counters SEC(".maps");
 
 /*  
     Program to avoid packets being spammed to the same port.
@@ -21,7 +25,7 @@ BPF_HASH(port_counters, __u16, struct port_stat);
     last_check to reset the counter if it has been a while since the first packet has been sent
     not deleting any records since there's only 65k ports (Cannot go over that).
 */
-
+SEC("xdp")
 int xdp_udp_flood(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
@@ -33,7 +37,7 @@ int xdp_udp_flood(struct xdp_md *ctx) {
 
     __u16 dest_port = 0; // holds dest port if found dest port after parsing headers
 
-    if (eth_proto == __constant_htons(ETH_P_IP)) {
+    if (eth_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end) return XDP_PASS;
 
@@ -45,7 +49,7 @@ int xdp_udp_flood(struct xdp_md *ctx) {
 
         dest_port = bpf_ntohs(udp->dest);
     } 
-    else if (eth_proto == __constant_htons(ETH_P_IPV6)) {
+    else if (eth_proto == bpf_htons(ETH_P_IPV6)) {
         struct ipv6hdr *ipv6 = (void *)(eth + 1);
 
         if ((void *)(ipv6 + 1) > data_end) return XDP_PASS;
@@ -60,7 +64,7 @@ int xdp_udp_flood(struct xdp_md *ctx) {
     }
 
     if(dest_port!=0) {
-         struct port_stat *stat = port_counters.lookup(&dest_port);
+         struct port_stat *stat = bpf_map_lookup_elem(&port_counters, &dest_port);
         __u64 now = bpf_ktime_get_ns();
 
         if (stat) {
@@ -76,13 +80,16 @@ int xdp_udp_flood(struct xdp_md *ctx) {
                 stat->packet_count = 1;
                 stat->last_check = now;
             }
+            bpf_map_update_elem(&port_counters, &dest_port, stat, BPF_ANY);
         } else {
             struct port_stat new_stat = {};
             new_stat.packet_count = 1;
             new_stat.last_check = now;
-            port_counters.update(&dest_port, &new_stat);
+            bpf_map_update_elem(&port_counters, &dest_port, &new_stat, BPF_ANY);
         }
     }
 
     return XDP_PASS;
 }
+
+char _license[] SEC("license") = "GPL";
